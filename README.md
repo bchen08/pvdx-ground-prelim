@@ -69,15 +69,6 @@ frames that were already decoded for re-decoding, so their decoded fields get st
 are simply rewritten, they are idempotent). Add the new `.env` keys from `.env.example` (service, Redis,
 push sections); every one of them has a working default.
 
-### About the SatNOGS token
-
-SatNOGS **Network** and SatNOGS **DB** issue *separate* API tokens. The Network token is shown at
-<https://network.satnogs.org/users/edit/> ("API Key"); a DB token is rejected by the Network API with
-`401 Invalid token`. `pvdx-ingest` logs that error once and continues anonymously, because reads work
-without a token. The difference is the throttle on the observations list: **60 requests/hour
-anonymous vs 240/hour authenticated**, so a valid Network token makes backfills 4x faster. The token
-is only ever sent to the SatNOGS host, never to the object storage that serves frame files.
-
 ### Configuration (`.env`)
 
 | Variable | Default | Meaning |
