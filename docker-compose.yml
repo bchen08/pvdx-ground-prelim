@@ -1,0 +1,94 @@
+# Local telemetry stack: InfluxDB 2.x + Grafana (auto-provisioned datasource and dashboard) + Redis.
+# `docker compose up -d` starts those three; the Python commands then run on the host and talk to
+# localhost:8086 (InfluxDB) and localhost:6379 (Redis).
+# `docker compose --profile cloud up -d --build` additionally builds and runs the service itself
+# (pvdx-serve: ingest + decode + API on :8080) from ./Dockerfile, with state in ./data.
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: pvdx-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:-change-me-admin-password}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-bse}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${INFLUX_RETENTION:-0}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-change-me-local-dev-token}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    # Volatile latest-values cache (GS3 in the comms design); nothing here needs to survive a restart.
+    image: redis:7-alpine
+    container_name: pvdx-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: pvdx-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # consumed by grafana/provisioning/datasources/influxdb.yml
+      INFLUX_ORG: ${INFLUX_ORG:-bse}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-change-me-local-dev-token}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+  pvdx:
+    # The service itself. Only with `--profile cloud`, so host-run pvdx-serve and the container
+    # never both sweep the same state database.
+    profiles: ["cloud"]
+    build: .
+    image: pvdx-ground:local
+    container_name: pvdx-ground
+    env_file: .env
+    environment:
+      # inside the compose network the other services are reachable by name
+      INFLUX_URL: http://influxdb:8086
+      REDIS_URL: redis://redis:6379/0
+      STATE_DB: /data/state.db
+      API_HOST: 0.0.0.0
+      API_PORT: "8080"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:

@@ -1,0 +1,68 @@
+{
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/5/15065374/data_15065374_2026-09-26T05-51-26_g0": {
+  "file": "data_15065374_2026-09-26T05-51-26_g0",
+  "size": 256,
+  "sha256": "3c5e99cf11fb5172ce546879914e21fe8b1e2e4332af50bebb9996ef31d2da3d",
+  "observation_id": 15065374
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/5/15065374/data_15065374_2026-09-26T05-50-41_g0": {
+  "file": "data_15065374_2026-09-26T05-50-41_g0",
+  "size": 256,
+  "sha256": "536a9ae43ebfeb3a7bf5b7211925bc8939fe4638b27208c309b011e5ee63c9a0",
+  "observation_id": 15065374
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-21-12_g0": {
+  "file": "data_15047444_2026-09-23T06-21-12_g0",
+  "size": 256,
+  "sha256": "c9d6d5f1488ae132e85c90d4a36a8a423541c9e0e228edebb883f1aae3fab5a3",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-21-02_g0": {
+  "file": "data_15047444_2026-09-23T06-21-02_g0",
+  "size": 256,
+  "sha256": "86dee4887d603334595161cef307f79684b6ca76c3728cf6c71ec6b4edd77a07",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-20-22_g0": {
+  "file": "data_15047444_2026-09-23T06-20-22_g0",
+  "size": 256,
+  "sha256": "2c55522eddfea71d8f25ed24bc39a26fb93e8b22b624d4f20bdfef4cedaf75e5",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-20-17_g0": {
+  "file": "data_15047444_2026-09-23T06-20-17_g0",
+  "size": 256,
+  "sha256": "41b78e784b1c8c48ff91877ac321a712b944bceabf63f06c2806426eabc766f9",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-20-12_g0": {
+  "file": "data_15047444_2026-09-23T06-20-12_g0",
+  "size": 256,
+  "sha256": "930a32c4f941e38ac6aab20ad5e347d3cf09711eca4eddf92b74181102cf07f4",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-20-07_g0": {
+  "file": "data_15047444_2026-09-23T06-20-07_g0",
+  "size": 256,
+  "sha256": "1d4e897b838ad1530be4cd8a6404504ee423faa8834ec04c80a1855ec832ad77",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-20-02_g0": {
+  "file": "data_15047444_2026-09-23T06-20-02_g0",
+  "size": 256,
+  "sha256": "f21d83925399c224f4e420da245a8c8cc1ec34cc129fc2bcb2d29188127fe764",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-19-07_g0": {
+  "file": "data_15047444_2026-09-23T06-19-07_g0",
+  "size": 256,
+  "sha256": "09c4d0d824342e3f4ad618e57d1408692c4cbd29ea7689ef070b504f0a516fab",
+  "observation_id": 15047444
+ },
+ "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/23/6/15047444/data_15047444_2026-09-23T06-18-37_g0": {
+  "file": "data_15047444_2026-09-23T06-18-37_g0",
+  "size": 256,
+  "sha256": "2c0035071b4c27694072b175901bd1cad9abf4505f9d12870631476f469b0119",
+  "observation_id": 15047444
+ }
+}

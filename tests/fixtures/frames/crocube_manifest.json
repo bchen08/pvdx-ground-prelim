@@ -1,0 +1,87 @@
+{
+ "crocube_image_chunk": {
+  "decode": "error: crocube: UnicodeDecodeError: 'ascii' codec can't decode byte 0xc4 in position 0:",
+  "fields": null,
+  "observation_id": 15056050,
+  "recorded": "2026-09-26 via pvdx-ingest (NORAD 62394 CroCube)",
+  "sha256": "f980abc39ce50535e53cb166fc43dd1d6454807eda096d2f8067ac9e887d304e",
+  "size": 160,
+  "url": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/10/15056050/data_15056050_2026-09-26T10-30-24_1"
+ },
+ "crocube_obc_beacon": {
+  "decode": "ok",
+  "fields": {
+   "dest_callsign": "CQ    ",
+   "obc_bat": 8158,
+   "obc_beacon_raw": "OBC,35,20685542,55623229,8158,539,4370",
+   "obc_freemem": 4370,
+   "obc_reset_cnt": 35,
+   "obc_temp_mcu": 539,
+   "obc_uptime": 20685542,
+   "obc_uptime_tot": 55623229,
+   "src_callsign": "9A0CC "
+  },
+  "observation_id": 15062574,
+  "recorded": "2026-09-26 via pvdx-ingest (NORAD 62394 CroCube)",
+  "sha256": "450147d84685a254b737825618e44dfb136bbcb49a4124f8ebb8f88d9277b7e3",
+  "size": 54,
+  "url": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/15/15062574/data_15062574_2026-09-26T15-09-38"
+ },
+ "crocube_psu_beacon": {
+  "decode": "ok",
+  "fields": {
+   "dest_callsign": "CQ    ",
+   "psu_battery": 8160,
+   "psu_beacon_raw": "PSU,16,20622381,55482312,8160,1005,656,419,204,7f,1,88",
+   "psu_ch0_state": 1,
+   "psu_ch1_state": 1,
+   "psu_ch2_state": 1,
+   "psu_ch3_state": 1,
+   "psu_ch4_state": 1,
+   "psu_ch5_state": 1,
+   "psu_ch6_state": 1,
+   "psu_ch_state_num": 127,
+   "psu_cur_in": 419,
+   "psu_cur_out": 204,
+   "psu_gnd_wdt": 88,
+   "psu_reset_cnt": 16,
+   "psu_sys_state": 1,
+   "psu_temp_bat": 656,
+   "psu_temp_sys": 1005,
+   "psu_uptime": 20622381,
+   "psu_uptime_tot": 55482312,
+   "src_callsign": "9A0CC "
+  },
+  "observation_id": 15062574,
+  "recorded": "2026-09-26 via pvdx-ingest (NORAD 62394 CroCube)",
+  "sha256": "aa558c45c7f24051583ca3e5d1d04aa59a03bbbf6038315887c028e7d890108e",
+  "size": 70,
+  "url": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/15/15062574/data_15062574_2026-09-26T15-06-32"
+ },
+ "crocube_uhf_beacon": {
+  "decode": "ok",
+  "fields": {
+   "dest_callsign": "CQ    ",
+   "src_callsign": "9A0CC ",
+   "uhf_act_rssi_raw": 80,
+   "uhf_beacon_raw": "U,20690909,55653024,18,0,571,725,431,724,DL7NDR,31310,3222205,80,127",
+   "uhf_dcd_rssi_raw": 127,
+   "uhf_digipeater_cnt": 724,
+   "uhf_last_digipeater": "DL7NDR",
+   "uhf_pa_temp": 431,
+   "uhf_reset_cnt": 18,
+   "uhf_rf_reset_cnt": 0,
+   "uhf_rf_temp": 725,
+   "uhf_rx_cnt": 31310,
+   "uhf_trx_temp": 571,
+   "uhf_tx_cnt": 3222205,
+   "uhf_uptime": 20690909,
+   "uhf_uptime_tot": 55653024
+  },
+  "observation_id": 15062576,
+  "recorded": "2026-09-26 via pvdx-ingest (NORAD 62394 CroCube)",
+  "sha256": "5846b8ed0a26e48f7cb49264c44a0e5b39f12aec0e3bf3a6c765c87b89dc14a3",
+  "size": 85,
+  "url": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/26/16/15062576/data_15062576_2026-09-26T16-43-36"
+ }
+}

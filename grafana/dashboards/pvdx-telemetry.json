@@ -1,0 +1,625 @@
+{
+  "uid": "pvdx-telemetry",
+  "title": "PVDX Telemetry (SatNOGS)",
+  "tags": [
+    "pvdx",
+    "satnogs"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 5,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "bucket",
+        "type": "constant",
+        "query": "telemetry",
+        "hide": 2,
+        "current": {
+          "value": "telemetry",
+          "text": "telemetry"
+        }
+      },
+      {
+        "name": "measurement",
+        "type": "constant",
+        "query": "telemetry",
+        "hide": 2,
+        "current": {
+          "value": "telemetry",
+          "text": "telemetry"
+        }
+      },
+      {
+        "name": "norad",
+        "label": "NORAD ID",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-telemetry"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"norad_cat_id\", start: -30d)",
+        "definition": "tagValues(norad_cat_id)",
+        "current": {}
+      },
+      {
+        "name": "station",
+        "label": "Ground station",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-telemetry"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"${bucket}\", tag: \"ground_station\", predicate: (r) => r.norad_cat_id == \"${norad}\", start: -30d)",
+        "definition": "tagValues(ground_station)",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "field",
+        "label": "Field",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-telemetry"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.measurementFieldKeys(bucket: \"${bucket}\", measurement: \"${measurement}\", start: -30d)",
+        "definition": "measurementFieldKeys(telemetry)",
+        "regex": "/^(?!frame_id$)(?!.*_raw$)/",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "voltage_fields",
+        "label": "Voltage fields",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-telemetry"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.measurementFieldKeys(bucket: \"${bucket}\", measurement: \"${measurement}\", start: -30d)",
+        "definition": "field keys matching volt/batt/bus",
+        "regex": "/^(?!.*temp)(?=.*(?:volt|vbat|batt|_bat$|_v$|bus))/i",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "temperature_fields",
+        "label": "Temperature fields",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-telemetry"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.measurementFieldKeys(bucket: \"${bucket}\", measurement: \"${measurement}\", start: -30d)",
+        "definition": "field keys matching temp",
+        "regex": "/temp/i",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Frames in range",
+      "type": "stat",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> count()\n  |> group()\n  |> sum()\n"
+        }
+      ],
+      "description": "Decoded frames written to InfluxDB in the selected time range.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Observations in range",
+      "type": "stat",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group(columns: [\"observation_id\"])\n  |> count()\n  |> group()\n  |> count()\n"
+        }
+      ],
+      "description": "Distinct SatNOGS observations contributing frames.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Stations in range",
+      "type": "stat",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group(columns: [\"ground_station\"])\n  |> count()\n  |> group()\n  |> count()\n"
+        }
+      ],
+      "description": "Distinct ground stations that received frames.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Last frame received",
+      "type": "stat",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group()\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _field: \"last_frame\", _value: float(v: int(v: r._time)) / 1000000.0 }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])\n"
+        }
+      ],
+      "description": "Timestamp of the newest frame (frame time from the SatNOGS file name).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Frames per hour",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group()\n  |> aggregateWindow(every: 1h, fn: count, createEmpty: true)\n  |> fill(value: 0)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r._value) }))\n"
+        }
+      ],
+      "description": "Frame arrival rate.",
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "axisPlacement": "auto",
+            "showPoints": "never"
+          },
+          "displayName": "frames / h",
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Battery / bus voltages",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${voltage_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+        }
+      ],
+      "description": "Fields selected by the 'voltage_fields' variable (defaults chosen for the stand-in satellite).",
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 5,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "displayName": "${__field.labels._field}"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Temperatures",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${temperature_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+        }
+      ],
+      "description": "Fields selected by the 'temperature_fields' variable.",
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 5,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "displayName": "${__field.labels._field}"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Any field ($field)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 16,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${field:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+        }
+      ],
+      "description": "Pick any decoded numeric field(s) with the 'field' variable at the top.",
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 5,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "displayName": "${__field.labels._field}"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Frames by station",
+      "type": "piechart",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 8,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group(columns: [\"station_name\"])\n  |> count()\n  |> keep(columns: [\"station_name\", \"_value\"])\n"
+        }
+      ],
+      "description": "Which SatNOGS stations delivered the frames.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "right"
+        },
+        "pieType": "donut"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.labels.station_name}"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Latest values (all fields)",
+      "type": "table",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> group(columns: [\"_field\"])\n  |> last()\n  |> toString()\n  |> keep(columns: [\"_time\", \"_field\", \"_value\", \"observation_id\", \"station_name\"])\n  |> group()\n  |> sort(columns: [\"_field\"])\n"
+        }
+      ],
+      "description": "Most recent value of every decoded field, with the observation and station it came from.",
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "_field"
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "description": "Decoded SatNOGS frames written by pvdx-decode. Every panel is decoder-agnostic: fields are picked by dashboard variables, so swapping in the PVDX decoder needs no dashboard change."
+}

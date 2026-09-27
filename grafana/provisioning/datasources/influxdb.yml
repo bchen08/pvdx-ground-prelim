@@ -1,0 +1,17 @@
+# Grafana datasource provisioning: InfluxDB 2.x over Flux. Values come from the compose environment.
+apiVersion: 1
+datasources:
+  - name: InfluxDB
+    uid: influxdb-telemetry
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    editable: false
+    jsonData:
+      version: Flux
+      organization: ${INFLUX_ORG}
+      defaultBucket: ${INFLUX_BUCKET}
+      tlsSkipVerify: true
+    secureJsonData:
+      token: ${INFLUX_TOKEN}
