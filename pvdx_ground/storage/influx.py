@@ -2,17 +2,22 @@
 
 One point per frame in the ``telemetry`` measurement (configurable), timestamped with the frame time
 SatNOGS encodes in the file name or the receive time our own ground station reported (falling back to
-the observation start), tagged by satellite, decoder, source, ground station and observation id. All numeric fields are written as
+the observation start), tagged by satellite, decoder, source, ground station and observation id, and with
+``primary`` = ``true`` | ``false``: every reception of a transmission gets its own point, and only the one
+of its primary frame (see ``StateStore.assign_primaries``) is ``true``, so dashboards that should count
+each transmission once filter on it (the dashboard's "Receptions" variable defaults to primary only). All numeric fields are written as
 floats so a field that is sometimes int and sometimes float never trips InfluxDB's per-shard field
 type check; strings are written as string fields. Timestamps are nanoseconds: the frame's second plus a
 deterministic sub-second offset derived from the frame's row id, so two frames received in the same
-second stay distinct points while re-writes of the same frame remain idempotent.
+second stay distinct points while re-writes of the same frame remain idempotent (a frame's primary never
+changes, so neither does its tag set; points written before the ``primary`` tag existed form other series
+and must be deleted when the measurement is rebuilt).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from pvdx_ground.decode import DecodedFrame
@@ -93,6 +98,7 @@ class InfluxWriter:
             .tag("observation_id", str(frame.observation_id) if frame.observation_id is not None else "")
             .tag("ground_station", str(frame.ground_station) if frame.ground_station is not None else "")
             .tag("station_name", frame.station_name or "")
+            .tag("primary", "false" if frame.is_copy else "true")
             .time(self.timestamp_ns(decoded), WritePrecision.NS)
         )
         point.field("frame_id", float(frame.id))
@@ -108,24 +114,33 @@ class InfluxWriter:
     def write_frames(self, frames: Iterable[DecodedFrame]) -> list[tuple[DecodedFrame, str]]:
         """Write points for ``frames``; returns the frames InfluxDB *rejected* (4xx), with the reason.
 
-        A rejected batch (for example a field type conflict) is retried point by point so one bad frame
-        cannot block the rest; 5xx and connection errors propagate so the caller retries the whole batch
-        later without marking anything decoded.
+        A frame whose point cannot be built (for example one with no time at all) is returned the same
+        way without being sent. A rejected batch (for example a field type conflict) is retried point by
+        point so one bad frame cannot block the rest; 5xx and connection errors propagate so the caller
+        retries the whole batch later without marking anything decoded.
         """
         from influxdb_client.rest import ApiException
 
-        items: Sequence[DecodedFrame] = list(frames)
-        if not items:
-            return []
-        points = [self.point(f) for f in items]
+        items: list[DecodedFrame] = []
+        points: list["Point"] = []
+        rejected: list[tuple[DecodedFrame, str]] = []
+        for frame in frames:
+            try:
+                point = self.point(frame)
+            except Exception as exc:  # noqa: BLE001 - one unbuildable point must not block the batch
+                rejected.append((frame, f"no InfluxDB point: {type(exc).__name__}: {exc}"))
+            else:
+                items.append(frame)
+                points.append(point)
+        if not points:
+            return rejected
         try:
             self._write_api.write(bucket=self.bucket, org=self.org, record=points)
-            return []
+            return rejected
         except ApiException as exc:
             if not _is_point_rejection(exc):
                 raise  # 5xx, 401/403/404 (credentials, org, bucket): the whole batch is retried later
             log.warning("InfluxDB rejected a batch of %d point(s) (%s); retrying one by one", len(points), exc.status)
-        rejected: list[tuple[DecodedFrame, str]] = []
         for frame, point in zip(items, points):
             try:
                 self._write_api.write(bucket=self.bucket, org=self.org, record=point)

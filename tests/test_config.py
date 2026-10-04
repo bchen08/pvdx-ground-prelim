@@ -6,7 +6,7 @@ import datetime as dt
 
 import pytest
 
-from pvdx_ground.config import ConfigError, Settings, load_dotenv
+from pvdx_ground.config import ConfigError, Settings, TelemetryAlias, load_dotenv
 
 
 def test_load_dotenv_parses_quotes_comments_and_export(tmp_path, monkeypatch):
@@ -61,7 +61,7 @@ def test_service_settings_defaults_and_parsing():
         "PUSH_TOKEN": "t",
     })
     assert s.api_host == "0.0.0.0" and s.api_port == 9000 and s.api_cors_origins == ("*", "http://a.test")
-    assert s.telemetry_aliases == {"battery": "psu_battery", "temperature": "obc_temp"}
+    assert s.telemetry_aliases == {"battery": TelemetryAlias("psu_battery"), "temperature": TelemetryAlias("obc_temp")}
     assert s.redis_url == "redis://r:6379/1" and s.redis_key_prefix == "sat:" and s.redis_telemetry_ttl == 90
     assert s.push_url == "http://cloud" and s.push_station == "BSE" and s.push_token == "t"
     assert s.ingest_poll == 30 and s.decode_poll == 5 and s.telemetry_stale_after == 120 and s.ingest_token == "t"
@@ -69,3 +69,74 @@ def test_service_settings_defaults_and_parsing():
                 {"TELEMETRY_ALIASES": "battery"}, {"TELEMETRY_ALIASES": "=x"}, {"REDIS_TELEMETRY_TTL": "0"}):
         with pytest.raises(ConfigError):
             Settings.from_env({"NORAD_CAT_ID": "1", **bad})
+
+
+def test_telemetry_aliases_with_scale_offset_and_unit():
+    aliases = Settings.from_env({"NORAD_CAT_ID": "1", "TELEMETRY_ALIASES": (
+        "battery=psu_battery*0.001:V, temperature = obc_temp_mcu * 0.01 : degC ,"
+        "signal_rssi=uhf_act_rssi_raw*0.5-134:dBm,uptime_seconds=obc_uptime:s,mode=obc-mode,kelvin=t+273.15:K,"
+        "milli=x*1e-3,flip=y*-2 + 1"
+    )}).telemetry_aliases
+    assert aliases["battery"] == TelemetryAlias("psu_battery", 0.001, 0.0, "V")
+    assert aliases["temperature"] == TelemetryAlias("obc_temp_mcu", 0.01, 0.0, "degC")
+    assert aliases["signal_rssi"] == TelemetryAlias("uhf_act_rssi_raw", 0.5, -134.0, "dBm")
+    assert aliases["uptime_seconds"] == TelemetryAlias("obc_uptime", unit="s")  # a unit alone converts nothing
+    assert not aliases["uptime_seconds"].converts and aliases["battery"].converts
+    assert aliases["mode"] == TelemetryAlias("obc-mode")  # a dash inside a name is not an offset
+    assert aliases["kelvin"] == TelemetryAlias("t", 1.0, 273.15, "K")
+    assert aliases["milli"] == TelemetryAlias("x", 0.001)
+    assert aliases["flip"] == TelemetryAlias("y", -2.0, 1.0)
+
+
+@pytest.mark.parametrize("entry", [
+    "battery", "=x", "b=", "b=x*abc", "b=x*", "b=x**2", "b=x*2e", "b=x+", "b=x*2-", "b=*0.5", "b=:V", "b=x:",
+    "b=x*0.001: ", "b=x*0", "b=x*1e999", "b=x+1e999",
+])
+def test_malformed_telemetry_aliases_are_config_errors(entry):
+    with pytest.raises(ConfigError, match="TELEMETRY_ALIASES entry"):
+        Settings.from_env({"NORAD_CAT_ID": "1", "TELEMETRY_ALIASES": f"ok=psu_battery,{entry}"})
+
+
+def test_alias_conversion_rounds_away_float_noise():
+    battery, temperature = TelemetryAlias("b", 0.001, unit="V"), TelemetryAlias("t", 0.01, unit="degC")
+    rssi = TelemetryAlias("r", 0.5, -134, "dBm")
+    assert 163 * 0.01 != 1.63 and temperature.convert(163) == 1.63  # 12 significant digits drop the noise
+    assert temperature.convert(-1757) == -17.57 and temperature.convert(539.0) == 5.39
+    assert battery.convert(7933) == 7.933 and battery.convert(8000) == 8.0 and battery.convert(7933.5) == 7.9335
+    assert rssi.convert(83) == -92.5 and rssi.convert(268) == 0.0 and isinstance(rssi.convert(268), float)
+    # a plain alias, or one with only a unit, passes every value through unchanged (no float coercion)
+    for plain in (TelemetryAlias("x"), TelemetryAlias("x", unit="s")):
+        assert type(plain.convert(21345256)) is int and plain.convert(21345256) == 21345256
+        assert plain.convert("SAFE") == "SAFE" and plain.convert(True) is True
+    # a converting alias never makes a value out of something that is not a finite number
+    for bad in ("7933", "SAFE", True, None, 10**400):
+        assert battery.convert(bad) is None, bad
+    assert TelemetryAlias("x", 1e300).convert(1e300) is None
+
+
+def test_url_schemes_are_checked_at_startup():
+    for url in ("redis://r:6379/1", "rediss://:pw@r:6380/0", "unix:///run/redis.sock", "REDIS://r"):
+        assert Settings.from_env({"NORAD_CAT_ID": "1", "REDIS_URL": url}).redis_url == url
+    assert Settings.from_env({"NORAD_CAT_ID": "1", "INFLUX_URL": "https://influx.test"}).influx_url == "https://influx.test"
+    for bad in ({"REDIS_URL": "localhost:6379"}, {"REDIS_URL": "http://r:6379"}, {"INFLUX_URL": "localhost:8086"},
+                {"INFLUX_URL": "redis://r:6379"}):
+        key = next(iter(bad))
+        with pytest.raises(ConfigError, match=f"{key} must start with"):
+            Settings.from_env({"NORAD_CAT_ID": "1", **bad})
+    with pytest.raises(ConfigError) as excinfo:
+        Settings.from_env({"NORAD_CAT_ID": "1", "REDIS_URL": "default:secret@r:6379"})
+    assert "secret" not in str(excinfo.value)  # a URL can carry a password; it is never echoed
+
+
+def test_ingest_min_interval_is_at_least_the_authenticated_throttle():
+    assert Settings.from_env({"NORAD_CAT_ID": "1", "INGEST_MIN_INTERVAL": "15"}).ingest_min_interval == 15.0
+    for bad in ("0", "-5", "0.001", "14.9"):
+        with pytest.raises(ConfigError, match="INGEST_MIN_INTERVAL must be >= 15"):
+            Settings.from_env({"NORAD_CAT_ID": "1", "INGEST_MIN_INTERVAL": bad})
+    with pytest.raises(ConfigError, match="INGEST_MIN_INTERVAL must be a number"):
+        Settings.from_env({"NORAD_CAT_ID": "1", "INGEST_MIN_INTERVAL": "fast"})
+    for bad in ("nan", "inf", "-inf"):  # nan slipped past the minimum and turned pacing off
+        with pytest.raises(ConfigError, match="INGEST_MIN_INTERVAL must be a finite number"):
+            Settings.from_env({"NORAD_CAT_ID": "1", "INGEST_MIN_INTERVAL": bad})
+    with pytest.raises(ConfigError, match="DECODE_POLL must be a finite number"):
+        Settings.from_env({"NORAD_CAT_ID": "1", "DECODE_POLL": "inf"})

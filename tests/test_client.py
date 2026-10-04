@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 
 import httpx
 import pytest
@@ -12,6 +14,7 @@ from pvdx_ground.ingest.client import (
     AUTH_REQUESTS_PER_HOUR,
     SatnogsAuthError,
     SatnogsError,
+    StopRequested,
     parse_link_header,
     parse_retry_after,
 )
@@ -143,3 +146,39 @@ def test_non_list_body_is_an_error(fake_api, clock, client):
     fake_api.queue(fake_api.page1_url, httpx.Response(200, json={"results": []}))
     with pytest.raises(SatnogsError, match="expected a JSON list"):
         client.fetch_page(fake_api.page1_url)
+
+
+def test_stop_interrupts_pacing_promptly(fake_api, clock):
+    stop = threading.Event()
+    client = make_client(fake_api, clock, stop=stop)  # anonymous: 63 s between list requests
+    client.fetch_page(fake_api.page1_url)
+    timer = threading.Timer(0.2, stop.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(StopRequested):
+            client.fetch_page(fake_api.page2_url)
+    finally:
+        timer.cancel()
+        client.close()
+    assert time.monotonic() - started < 5
+    assert len(fake_api.api_calls) == 1  # page 2 was never requested
+    assert clock.sleeps == []  # with a stop event the client waits on it instead of sleeping
+
+
+def test_stop_interrupts_backoff_without_another_attempt(fake_api, clock):
+    stop = threading.Event()
+    client = make_client(fake_api, clock, stop=stop, min_interval=0)
+    frame_url = next(iter(fake_api.frames))
+    fake_api.queue(frame_url, httpx.Response(503, headers={"Retry-After": "120"}))
+    timer = threading.Timer(0.2, stop.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(StopRequested):
+            client.download(frame_url)
+    finally:
+        timer.cancel()
+        client.close()
+    assert time.monotonic() - started < 5
+    assert len(fake_api.frame_calls) == 1

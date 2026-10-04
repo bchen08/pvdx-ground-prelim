@@ -6,6 +6,8 @@ finishes, the watermark advances to the sweep's start time; the next sweep begin
 ``watermark - overlap`` so late-vetted observations and late-uploaded frames are still picked up.
 Frames are downloaded after each page (data flows early) and any pending/failed frames are retried
 at the end of every run. Re-running is idempotent: nothing is re-downloaded, nothing is skipped.
+With a ``stop`` event (``pvdx-serve``) a run ends early between pages and between frame downloads; the
+next run resumes from the saved cursor and the frames still pending.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from pvdx_ground.ingest.client import NetworkClient, SatnogsError
+from pvdx_ground.ingest.client import NetworkClient, SatnogsError, StopRequested
 from pvdx_ground.ingest.state import StateStore
 from pvdx_ground.timeutil import to_iso_z, utcnow
 
@@ -69,6 +71,7 @@ class IngestWorker:
         download_delay: float = 0.25,
         now: Callable[[], dt.datetime] = utcnow,
         sleep: Callable[[float], None] = time.sleep,
+        stop: threading.Event | None = None,
     ) -> None:
         self.client = client
         self.store = store
@@ -81,7 +84,11 @@ class IngestWorker:
         self.download_delay = download_delay
         self._now = now
         self._sleep = sleep
+        self.stop = stop
         self._failed_this_run: set[int] = set()
+
+    def _stopping(self) -> bool:
+        return self.stop is not None and self.stop.is_set()
 
     # -- planning ----------------------------------------------------------------------------------
     def compute_since(self) -> dt.datetime:
@@ -165,6 +172,10 @@ class IngestWorker:
                 if self.max_pages is not None and result.pages >= self.max_pages:
                     log.info("--max-pages %d reached; sweep %d will resume next run", self.max_pages, result.sweep_id)
                     break
+                if self._stopping():
+                    raise StopRequested
+        except StopRequested:
+            log.info("stop requested; sweep %d will resume from its saved cursor next run", result.sweep_id)
         except SatnogsError as exc:
             if result.resumed and result.pages == 0 and exc.status in (400, 404):
                 # The saved cursor is no longer accepted: drop the sweep so the next run starts fresh.
@@ -172,18 +183,24 @@ class IngestWorker:
                 self.store.finish_sweep(result.sweep_id, finished_at=self._now(), state="aborted")
             raise
 
-        # Retry anything still pending/failed from this or earlier runs.
-        self._download_pending(result)
+        if not self._stopping():
+            # Retry anything still pending/failed from this or earlier runs.
+            self._download_pending(result)
         log.info(result.summary())
         return result
 
     def _download_pending(self, result: SweepResult) -> None:
         refs = self.store.pending_frames(max_attempts=self.max_frame_attempts)
-        for ref in refs:
+        for done, ref in enumerate(refs):
             if ref.id in self._failed_this_run:
                 continue  # one download attempt (with HTTP retries) per frame per run; next run retries
             try:
+                if self._stopping():
+                    raise StopRequested
                 raw = self.client.download(ref.url)
+            except StopRequested:
+                log.info("stop requested; %d frame(s) left for the next run", len(refs) - done)
+                return
             except SatnogsError as exc:
                 self.store.mark_frame_failed(ref.id, str(exc))
                 self._failed_this_run.add(ref.id)
@@ -197,7 +214,10 @@ class IngestWorker:
             result.frames_downloaded += 1
             log.debug("frame %d stored (%d bytes) for observation %d", ref.id, len(raw), ref.observation_id)
             if self.download_delay:
-                self._sleep(self.download_delay)
+                if self.stop is None:
+                    self._sleep(self.download_delay)
+                else:
+                    self.stop.wait(self.download_delay)
 
     # -- polling -----------------------------------------------------------------------------------
     def run_forever(self, interval: float, *, stop: "threading.Event | None" = None) -> None:

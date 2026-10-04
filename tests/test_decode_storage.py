@@ -23,6 +23,11 @@ def test_normalise_fields_coerces_to_scalars():
     assert out == {"a": 1, "b": 2.5, "c": "x", "d": 1, "e": "SAFE", "f": "01ff"}
 
 
+def test_normalise_fields_drops_infinities():
+    out = normalise_fields({"a": 1.5, "pinf": float("inf"), "ninf": float("-inf"), "big": 2**64, "max": 1.7976931348623157e308})
+    assert out == {"a": 1.5, "big": 2**64, "max": 1.7976931348623157e308}
+
+
 def test_get_decoder_specs():
     assert get_decoder("satnogs:geoscan").name == "satnogs:geoscan"
     assert get_decoder("satnogs:GeoScan").name == "satnogs:geoscan"
@@ -116,6 +121,34 @@ def test_write_frames_falls_back_per_point_on_4xx_and_reports_rejections():
         writer.close()
     assert [f.frame.id for f, _ in rejected] == [2] and "422" in rejected[0][1]
     assert len(calls) == 4  # one batch attempt + three single points
+
+
+def test_write_frames_reports_a_frame_whose_point_cannot_be_built():
+    from influxdb_client.rest import ApiException
+
+    writer = InfluxWriter("http://localhost:8086", "t", "bse", "telemetry")
+    timeless = DecodedFrame(frame=make_frame(id=2, frame_time=None, observation_start=None), decoder="x", fields={"a": 2})
+    frames = [DecodedFrame(frame=make_frame(id=1), decoder="x", fields={"a": 1}), timeless,
+              DecodedFrame(frame=make_frame(id=3), decoder="x", fields={"a": 3})]
+    calls = []
+
+    def fake_write(*, bucket, org, record):
+        calls.append(record)
+    writer._write_api.write = fake_write
+    try:
+        rejected = writer.write_frames(frames)
+        assert rejected == [(timeless, "no InfluxDB point: ValueError: frame 2 has neither a frame time nor an observation")]
+        assert len(calls) == 1 and ["frame_id=1" in p.to_line_protocol() for p in calls[0]] == [True, False]
+        calls.clear()
+        assert writer.write_frames([timeless]) == rejected and calls == []  # nothing left to send
+
+        def down(*, bucket, org, record):
+            raise ApiException(status=503, reason="down")
+        writer._write_api.write = down
+        with pytest.raises(ApiException):  # the rest of the batch is still retried as a whole later
+            writer.write_frames(frames)
+    finally:
+        writer.close()
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

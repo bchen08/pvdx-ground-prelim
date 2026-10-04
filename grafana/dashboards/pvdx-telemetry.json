@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 5,
+  "version": 6,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -76,6 +76,38 @@
             "$__all"
           ]
         }
+      },
+      {
+        "name": "primary",
+        "label": "Receptions",
+        "description": "Primary only (the default): one point per transmission. With a station selected that shows only the transmissions this station supplied the primary for; choose All to see every reception.",
+        "type": "custom",
+        "query": "Primary only : true,Copies only : false",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "Primary only",
+          "value": "true"
+        },
+        "options": [
+          {
+            "selected": false,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": true,
+            "text": "Primary only",
+            "value": "true"
+          },
+          {
+            "selected": false,
+            "text": "Copies only",
+            "value": "false"
+          }
+        ]
       },
       {
         "name": "field",
@@ -166,7 +198,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
@@ -176,10 +208,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> count()\n  |> group()\n  |> sum()\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> count()\n  |> group()\n  |> sum()\n"
         }
       ],
-      "description": "Decoded frames written to InfluxDB in the selected time range.",
+      "description": "Decoded frames in the selected time range, following the 'Receptions' variable. With 'Primary only' (the default) each transmission counts once, however many stations or decoders received it; with a station selected that leaves only the transmissions this station supplied the primary for. Choose All to count every reception.",
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -201,6 +233,51 @@
       }
     },
     {
+      "id": 11,
+      "title": "Receptions in range",
+      "type": "stat",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-telemetry"
+      },
+      "gridPos": {
+        "x": 3,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-telemetry"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> count()\n  |> group()\n  |> sum()\n"
+        }
+      ],
+      "description": "Every decoded reception in the selected time range, including duplicate copies of one frame from other stations and from gr-satellites (_gN) files (ignores the 'Receptions' variable).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "light-blue"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 2,
       "title": "Observations in range",
       "type": "stat",
@@ -209,9 +286,9 @@
         "uid": "influxdb-telemetry"
       },
       "gridPos": {
-        "x": 4,
+        "x": 6,
         "y": 0,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
@@ -254,9 +331,9 @@
         "uid": "influxdb-telemetry"
       },
       "gridPos": {
-        "x": 8,
+        "x": 9,
         "y": 0,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
@@ -353,10 +430,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group()\n  |> aggregateWindow(every: 1h, fn: count, createEmpty: true)\n  |> fill(value: 0)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r._value) }))\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group()\n  |> aggregateWindow(every: 1h, fn: count, createEmpty: true)\n  |> fill(value: 0)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r._value) }))\n"
         }
       ],
-      "description": "Frame arrival rate.",
+      "description": "Frame arrival rate, following the 'Receptions' variable: one per transmission with 'Primary only' (the default; with a station selected, only the transmissions it supplied the primary for). Choose All for every reception.",
       "options": {
         "legend": {
           "showLegend": false,
@@ -408,10 +485,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${voltage_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${voltage_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
         }
       ],
-      "description": "Fields selected by the 'voltage_fields' variable (defaults chosen for the stand-in satellite).",
+      "description": "Fields selected by the 'voltage_fields' variable (defaults chosen for the stand-in satellite). Follows the 'Receptions' variable: 'Primary only' (the default) plots one point per transmission, which with a station selected shows only the transmissions this station supplied the primary for; choose All to see every reception.",
       "options": {
         "legend": {
           "showLegend": true,
@@ -456,10 +533,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${temperature_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${temperature_fields:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
         }
       ],
-      "description": "Fields selected by the 'temperature_fields' variable.",
+      "description": "Fields selected by the 'temperature_fields' variable. Follows the 'Receptions' variable: 'Primary only' (the default) plots one point per transmission, which with a station selected shows only the transmissions this station supplied the primary for; choose All to see every reception.",
       "options": {
         "legend": {
           "showLegend": true,
@@ -504,10 +581,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${field:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> filter(fn: (r) => r._field =~ /^(${field:regex})$/)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"ground_station\"])\n  |> group(columns: [\"_field\"])\n"
         }
       ],
-      "description": "Pick any decoded numeric field(s) with the 'field' variable at the top.",
+      "description": "Pick any decoded numeric field(s) with the 'field' variable at the top. Follows the 'Receptions' variable: 'Primary only' (the default) plots one point per transmission, which with a station selected shows only the transmissions this station supplied the primary for; choose All to see every reception.",
       "options": {
         "legend": {
           "showLegend": true,
@@ -555,7 +632,7 @@
           "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r._field == \"frame_id\")\n  |> group(columns: [\"station_name\"])\n  |> count()\n  |> keep(columns: [\"station_name\", \"_value\"])\n"
         }
       ],
-      "description": "Which SatNOGS stations delivered the frames.",
+      "description": "Receptions per station, duplicates included (ignores the 'Receptions' variable): a frame counts once for every station that heard it, and often twice for one SatNOGS station (its own decoder's file and the gr-satellites _gN file).",
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -599,10 +676,10 @@
             "uid": "influxdb-telemetry"
           },
           "refId": "A",
-          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> group(columns: [\"_field\"])\n  |> last()\n  |> toString()\n  |> keep(columns: [\"_time\", \"_field\", \"_value\", \"observation_id\", \"station_name\"])\n  |> group()\n  |> sort(columns: [\"_field\"])\n"
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"${measurement}\")\n  |> filter(fn: (r) => r.norad_cat_id == \"${norad}\")\n  |> filter(fn: (r) => r.ground_station =~ /^(${station:regex})$/)\n  |> filter(fn: (r) => r.primary =~ /^(${primary:regex})$/)\n  |> group(columns: [\"_field\"])\n  |> last()\n  |> toString()\n  |> keep(columns: [\"_time\", \"_field\", \"_value\", \"observation_id\", \"station_name\"])\n  |> group()\n  |> sort(columns: [\"_field\"])\n"
         }
       ],
-      "description": "Most recent value of every decoded field, with the observation and station it came from.",
+      "description": "Most recent value of every decoded field, with the observation and station it came from. Follows the 'Receptions' variable: with 'Primary only' (the default) values come from the primary reception of each transmission, which with a station selected means only the transmissions this station supplied the primary for.",
       "options": {
         "showHeader": true,
         "sortBy": [
@@ -621,5 +698,5 @@
     "list": []
   },
   "links": [],
-  "description": "Decoded SatNOGS frames written by pvdx-decode. Every panel is decoder-agnostic: fields are picked by dashboard variables, so swapping in the PVDX decoder needs no dashboard change."
+  "description": "Decoded SatNOGS frames written by pvdx-decode. Every panel is decoder-agnostic: fields are picked by dashboard variables, so swapping in the PVDX decoder needs no dashboard change. Telemetry panels, 'Frames in range' and 'Frames per hour' follow the 'Receptions' variable: one point per transmission (its primary reception) by default, every copy with All. 'Receptions in range' and 'Frames by station' always count every copy."
 }

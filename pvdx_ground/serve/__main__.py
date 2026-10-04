@@ -7,8 +7,9 @@ Three parts share one SQLite state database:
   pushed frames, writes InfluxDB points and publishes latest values to Redis (``pvdx-decode --poll``);
 * the **HTTP API** (uvicorn) in the main thread.
 
-Each part has its own SQLite connection; the database is created or migrated once before the threads
-start. Ctrl-C (or SIGTERM in Docker) stops the API, then the threads finish their current step and exit.
+Each thread has its own SQLite connection and every API request opens its own; the database is created
+or migrated once before the threads start. Ctrl-C or SIGTERM (``docker stop``, ``kill``, systemd) stops
+the API, then the threads finish their current step and exit.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -44,6 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-api", action="store_true", help="do not serve HTTP (ingest and decode only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging and HTTP access log")
     return parser
+
+
+def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
+    """SIGTERM handler: shut down exactly like Ctrl-C.
+
+    uvicorn saves this as the previous handler and re-raises SIGTERM into it after its graceful stop; with
+    the default handler instead, a host process (not PID 1 in a container) would die before the workers stop.
+    """
+    raise KeyboardInterrupt
 
 
 def _ingest_thread(settings: Settings, poll: float, stop: threading.Event) -> None:
@@ -118,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             target=_decode_thread, args=(settings, decoder, args.measurement, settings.decode_poll, stop, wake),
             name="decode", daemon=True,
         )
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)  # also ends the --no-api wait below
     for name, thread in workers.items():
         thread.start()
         log.info("%s worker started", name)
