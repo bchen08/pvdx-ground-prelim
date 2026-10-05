@@ -9,8 +9,15 @@ Idempotency rules:
   resumes where it stopped, and the per-satellite *watermark* only advances when a sweep completes;
 * ``latest_values`` holds the newest decoded value per field and satellite and only moves forward in time.
 
-Schema version 2. A version-1 database (SatNOGS frames only, no decoded fields) is migrated in place when
-opened; its already-decoded frames are queued for re-decoding so the decoded fields get filled in.
+Duplicate receptions: one transmission often arrives several times (SatNOGS publishes a gr-satellites
+``_gN`` copy next to the station's own decoder output, several stations hear the same pass, and our ground
+station may push it too). Every copy is kept; copies of one transmission share a *primary* frame
+(``primary_frame_id``, see :meth:`StateStore.assign_primaries`), and only the primary feeds
+``latest_values``, the default history and the dashboards.
+
+Schema version 3. Older databases are migrated in place when opened: a version-1 database (SatNOGS frames
+only, no decoded fields) first becomes version 2 and its already-decoded frames are queued for re-decoding
+so the decoded fields get filled in; a version-2 database gains each frame's family and primary.
 """
 
 from __future__ import annotations
@@ -21,7 +28,8 @@ import json
 import logging
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
@@ -31,8 +39,15 @@ from pvdx_ground.timeutil import parse_iso8601, to_iso_z
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SOURCES = ("satnogs", "groundstation")
+FAMILIES = ("native", "grsat", "push")
+
+# Copies of one transmission: same satellite and bytes, effective times within a window of the primary copy
+# (anchored there, never chained). In one observation the gr-satellites copy is 0-16 s early; across
+# stations clocks have been seen 39 s late. Identical CroCube bytes recur >= 221 s apart: a new transmission.
+SAME_OBSERVATION_WINDOW = dt.timedelta(seconds=30)
+CROSS_STATION_WINDOW = dt.timedelta(seconds=45)
 
 _FRAMES_TABLE = """
 CREATE TABLE IF NOT EXISTS frames (
@@ -55,9 +70,12 @@ CREATE TABLE IF NOT EXISTS frames (
     decode_status  TEXT,
     decoder        TEXT,
     decoded_json   TEXT,
-    decode_error   TEXT
+    decode_error   TEXT,
+    family         TEXT CHECK (family IN ('native', 'grsat', 'push')),
+    primary_frame_id INTEGER
 )
 """
+_V3_COLUMNS = (("family", "TEXT CHECK (family IN ('native', 'grsat', 'push'))"), ("primary_frame_id", "INTEGER"))
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS meta (
@@ -99,6 +117,7 @@ CREATE INDEX IF NOT EXISTS ix_frames_status ON frames (status);
 CREATE INDEX IF NOT EXISTS ix_frames_observation ON frames (observation_id);
 CREATE INDEX IF NOT EXISTS ix_frames_decode ON frames (status, decode_status);
 CREATE INDEX IF NOT EXISTS ix_frames_norad_time ON frames (norad_cat_id, frame_time);
+CREATE INDEX IF NOT EXISTS ix_frames_norad_sha256 ON frames (norad_cat_id, sha256);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_frames_pushed
     ON frames (norad_cat_id, station_name, frame_time, sha256) WHERE source = 'groundstation';
 CREATE TABLE IF NOT EXISTS sweeps (
@@ -134,6 +153,8 @@ CREATE TABLE IF NOT EXISTS latest_values (
 
 # .../data_obs/2026/9/26/19/15060641/data_15060641_2026-09-26T19-37-23
 _FRAME_TIME_RE = re.compile(r"data_(?:obs_)?(\d+)_(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})(?:\D|$)")
+# .../data_15060641_2026-09-26T19-37-08_g0: written by gr-satellites, not the station's gr-satnogs decoder
+_GRSAT_NAME_RE = re.compile(r"_g\d+$")
 _FIELD_NAME_RE = re.compile(r'^[^"\\\x00]{1,200}$')
 
 # effective time of a frame: the time in the SatNOGS file name (or the pushed receive time), else the
@@ -153,6 +174,16 @@ def frame_time_from_url(url: str) -> dt.datetime | None:
         return None
 
 
+def frame_family(source: str, url: str | None) -> str:
+    """Which decoder produced a frame: ``push`` (our ground station), ``grsat`` (a SatNOGS ``_gN`` file from
+    gr-satellites, timestamped up to ~16 s early) or ``native`` (the station's own gr-satnogs decoder)."""
+    if source == "groundstation":
+        return "push"
+    if url and _GRSAT_NAME_RE.search(url.rsplit("/", 1)[-1]):
+        return "grsat"
+    return "native"
+
+
 def json_path(field: str) -> str:
     """JSON path for ``json_extract`` on ``decoded_json``; rejects names that cannot be quoted safely."""
     if not _FIELD_NAME_RE.match(field):
@@ -162,6 +193,12 @@ def json_path(field: str) -> str:
 
 def _parse_time(value: str | None) -> dt.datetime | None:
     return parse_iso8601(value) if value else None
+
+
+def _window(a: "_Reception", b: "_Reception") -> dt.timedelta:
+    """How far apart two copies of one transmission may be: closer when both come from one observation."""
+    same_observation = a.observation_id is not None and a.observation_id == b.observation_id
+    return SAME_OBSERVATION_WINDOW if same_observation else CROSS_STATION_WINDOW
 
 
 def _load_json(text: str | None) -> Any:
@@ -208,6 +245,8 @@ class StoredFrame:
     tle2: str | None
     source: str = "satnogs"
     meta: Mapping[str, Any] = dc_field(default_factory=dict)
+    family: str | None = None
+    primary_frame_id: int | None = None
 
     @property
     def timestamp(self) -> dt.datetime:
@@ -216,6 +255,21 @@ class StoredFrame:
         if when is None:
             raise ValueError(f"frame {self.id} has neither a frame time nor an observation")
         return when
+
+    @property
+    def is_copy(self) -> bool:
+        """True for a duplicate reception of a transmission whose primary is another frame."""
+        return self.primary_frame_id is not None and self.primary_frame_id != self.id
+
+
+@dataclass(frozen=True)
+class _Reception:
+    """One stored frame as primary assignment sees it."""
+
+    id: int
+    observation_id: int | None
+    family: str | None
+    time: dt.datetime
 
 
 @dataclass(frozen=True)
@@ -255,13 +309,19 @@ class Sweep:
 
 
 class StateStore:
-    """Thin wrapper over a SQLite database file. One instance per thread; not thread-safe."""
+    """Thin wrapper over a SQLite database file. One instance per thread; not thread-safe.
 
-    def __init__(self, path: str | Path) -> None:
+    ``check_same_thread=False`` lifts SQLite's same-thread check so one instance may move between
+    threads; the caller must then guarantee strictly sequential use (never two threads at once).
+    """
+
+    def __init__(self, path: str | Path, *, check_same_thread: bool = True) -> None:
         self.path = Path(path)
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(self.path), isolation_level=None, timeout=30)  # autocommit; explicit txns
+        self._db = sqlite3.connect(  # autocommit; explicit txns
+            str(self.path), isolation_level=None, timeout=30, check_same_thread=check_same_thread
+        )
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
@@ -287,12 +347,14 @@ class StateStore:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
             )
             return
-        if version == 1:
-            self._migrate_v1_to_v2()
-        elif version > SCHEMA_VERSION:
+        if version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"{self.path}: schema version {version} is newer than this code supports ({SCHEMA_VERSION})"
             )
+        if version == 1:
+            self._migrate_v1_to_v2()
+        if version <= 2:
+            self._migrate_v2_to_v3()
         self._db.executescript(SCHEMA)  # idempotent: adds any table or index that is missing
 
     def schema_version(self) -> int | None:
@@ -333,6 +395,38 @@ class StateStore:
         finally:
             self._db.execute("PRAGMA foreign_keys=ON")
         log.info("migration done: %d previously decoded frame(s) queued for re-decoding to fill decoded fields", requeued)
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Add each frame's family and primary; backfill both for every stored frame (one transaction)."""
+        try:
+            self._db.execute("BEGIN IMMEDIATE")
+            if self.schema_version() != 2:  # another process migrated while we waited for the lock
+                self._db.execute("COMMIT")
+                return
+            log.info("migrating %s from schema version 2 to 3", self.path)
+            columns = {r["name"] for r in self._db.execute("PRAGMA table_info(frames)")}
+            for name, ddl in _V3_COLUMNS:
+                if name not in columns:  # a database just migrated from version 1 already has them
+                    self._db.execute(f"ALTER TABLE frames ADD COLUMN {name} {ddl}")
+            self._db.execute("CREATE INDEX IF NOT EXISTS ix_frames_norad_sha256 ON frames (norad_cat_id, sha256)")
+            self._db.executemany(
+                "UPDATE frames SET family = ? WHERE id = ?",
+                [
+                    (frame_family(r["source"], r["url"]), r["id"])
+                    for r in self._db.execute("SELECT id, source, url FROM frames WHERE family IS NULL").fetchall()
+                ],
+            )
+            assigned = self._assign_primaries(None)
+            self._db.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+            self._db.execute("COMMIT")
+        except Exception:
+            self._db.execute("ROLLBACK")
+            raise
+        primaries = sum(1 for frame_id, primary in assigned.items() if frame_id == primary)
+        log.info(
+            "migration done: %d stored frame(s) grouped into %d transmission(s), %d duplicate reception(s)",
+            len(assigned), primaries, len(assigned) - primaries,
+        )
 
     # -- observations ------------------------------------------------------------------------------
     def upsert_observation(self, obs: dict[str, Any], *, seen_at: dt.datetime) -> tuple[bool, int]:
@@ -413,9 +507,10 @@ class StateStore:
             for url in demod_urls:
                 frame_time = frame_time_from_url(url)
                 cur = self._db.execute(
-                    "INSERT OR IGNORE INTO frames (source, observation_id, norad_cat_id, station_name, url, frame_time) "
-                    "VALUES ('satnogs', ?, ?, ?, ?, ?)",
-                    (obs_id, row["norad_cat_id"], row["station_name"], url, to_iso_z(frame_time) if frame_time else None),
+                    "INSERT OR IGNORE INTO frames (source, observation_id, norad_cat_id, station_name, url, "
+                    "frame_time, family) VALUES ('satnogs', ?, ?, ?, ?, ?, ?)",
+                    (obs_id, row["norad_cat_id"], row["station_name"], url,
+                     to_iso_z(frame_time) if frame_time else None, frame_family("satnogs", url)),
                 )
                 new_frames += cur.rowcount if cur.rowcount > 0 else 0
             self._refresh_completion(obs_id)
@@ -503,8 +598,8 @@ class StateStore:
             cur = self._db.execute(
                 """
                 INSERT OR IGNORE INTO frames (source, norad_cat_id, station_name, frame_time, status, attempts,
-                                              sha256, size, raw, meta_json, downloaded_at)
-                VALUES ('groundstation', ?, ?, ?, 'ok', 1, ?, ?, ?, ?, ?)
+                                              sha256, size, raw, meta_json, downloaded_at, family)
+                VALUES ('groundstation', ?, ?, ?, 'ok', 1, ?, ?, ?, ?, ?, 'push')
                 """,
                 (
                     norad_cat_id, station_name, when, digest, len(raw), raw,
@@ -526,8 +621,8 @@ class StateStore:
     # -- decode stage ------------------------------------------------------------------------------
     _FRAME_SELECT = (
         "SELECT f.id, f.source, f.observation_id, f.url, f.raw, f.sha256, f.frame_time, f.meta_json, "
-        "f.norad_cat_id, f.station_name, o.sat_id, o.ground_station, o.start_time, o.end_time, "
-        "o.transmitter_uuid, o.tle0, o.tle1, o.tle2 "
+        "f.norad_cat_id, f.station_name, f.family, f.primary_frame_id, o.sat_id, o.ground_station, o.start_time, "
+        "o.end_time, o.transmitter_uuid, o.tle0, o.tle1, o.tle2 "
         "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id"
     )
 
@@ -552,6 +647,8 @@ class StateStore:
             tle2=r["tle2"],
             source=r["source"],
             meta=_load_json(r["meta_json"]) or {},
+            family=r["family"],
+            primary_frame_id=r["primary_frame_id"],
         )
 
     def frames_to_decode(
@@ -571,6 +668,69 @@ class StateStore:
             params += (limit,)
         return [self._stored_frame(r) for r in self._db.execute(sql, params)]
 
+    def assign_primaries(self, frame_ids: Iterable[int] | None = None) -> dict[int, int]:
+        """Give every stored frame among ``frame_ids`` (all when ``None``) that has no primary yet its primary.
+
+        A transmission is every copy with the same satellite and sha256 whose effective time lies within
+        ``SAME_OBSERVATION_WINDOW`` (both copies from one SatNOGS observation) or ``CROSS_STATION_WINDOW``
+        (otherwise) of its primary. Native and pushed copies are placed before gr-satellites copies (each
+        group in time order, then by id), so they become the primary when they arrive together; each copy
+        joins the nearest primary in its window or becomes a primary itself. Assignments are sticky: a
+        native copy that arrives after a gr-satellites-only transmission got its primary stays a copy.
+        Returns ``{frame_id: primary_frame_id}`` for the frames assigned now.
+        """
+        with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            assigned = self._assign_primaries(frame_ids)
+            self._db.execute("COMMIT")
+        return assigned
+
+    def _assign_primaries(self, frame_ids: Iterable[int] | None) -> dict[int, int]:
+        sql = (
+            f"SELECT f.id, f.norad_cat_id, f.sha256, f.observation_id, f.family, {_EFFECTIVE_TIME} AS t "
+            "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id "
+            "WHERE f.status = 'ok' AND f.primary_frame_id IS NULL"
+        )
+        if frame_ids is None:
+            rows = self._db.execute(sql).fetchall()
+        else:
+            ids = sorted(set(frame_ids))
+            rows = []
+            for start in range(0, len(ids), 500):  # stay well under SQLite's bound-parameter limit
+                chunk = ids[start:start + 500]
+                rows += self._db.execute(sql + f" AND f.id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+        assigned: dict[int, int] = {}
+        pending: dict[tuple[int, str], list[_Reception]] = defaultdict(list)
+        for r in rows:
+            when = _parse_time(r["t"])
+            if r["norad_cat_id"] is None or r["sha256"] is None or when is None:
+                assigned[r["id"]] = r["id"]  # nothing to compare it with: a transmission of its own
+            else:
+                reception = _Reception(r["id"], r["observation_id"], r["family"], when)
+                pending[(r["norad_cat_id"], r["sha256"])].append(reception)
+        for (norad, digest), receptions in pending.items():
+            primaries: list[_Reception] = []
+            for p in self._db.execute(
+                f"SELECT f.id, f.observation_id, f.family, {_EFFECTIVE_TIME} AS t "
+                "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id "
+                "WHERE f.norad_cat_id = ? AND f.sha256 = ? AND f.primary_frame_id = f.id",
+                (norad, digest),
+            ):
+                if p["t"] is not None:
+                    primaries.append(_Reception(p["id"], p["observation_id"], p["family"], parse_iso8601(p["t"])))
+            receptions.sort(key=lambda x: (x.family == "grsat", x.time, x.id))
+            for frame in receptions:
+                candidates = [p for p in primaries if abs(frame.time - p.time) <= _window(frame, p)]
+                if candidates:
+                    assigned[frame.id] = min(candidates, key=lambda p: (abs(frame.time - p.time), p.id)).id
+                else:
+                    assigned[frame.id] = frame.id
+                    primaries.append(frame)
+        self._db.executemany(
+            "UPDATE frames SET primary_frame_id = ? WHERE id = ?", [(p, f) for f, p in assigned.items()]
+        )
+        return assigned
+
     def mark_decoded(
         self,
         frame_id: int,
@@ -583,11 +743,14 @@ class StateStore:
     ) -> None:
         """Record the decode outcome (``ok``, ``empty`` or ``error``) for a frame.
 
-        For ``ok`` the decoded ``fields`` are stored with the frame and folded into ``latest_values``
-        (a value only replaces the stored one when its frame is newer, so backfills never regress it).
+        For ``ok`` the decoded ``fields`` are stored with the frame and, when it is the primary of its
+        transmission, folded into ``latest_values`` (a value only replaces the stored one when its frame is
+        newer, so backfills never regress it); a copy carries the same values and leaves them alone. A frame
+        that has no primary yet (the decode stage assigns them per batch) gets one here.
         """
         with self._db:
             self._db.execute("BEGIN IMMEDIATE")
+            self._assign_primaries([frame_id])  # no-op once assigned
             self._db.execute(
                 "UPDATE frames SET decode_status = ?, decode_error = ?, decoded_at = ?, "
                 "decoder = COALESCE(?, decoder), decoded_json = ? WHERE id = ?",
@@ -598,11 +761,14 @@ class StateStore:
             )
             if status == "ok" and fields:
                 row = self._db.execute(
-                    f"SELECT f.norad_cat_id, f.source, f.station_name, {_EFFECTIVE_TIME} AS t "
+                    f"SELECT f.norad_cat_id, f.source, f.station_name, f.primary_frame_id, {_EFFECTIVE_TIME} AS t "
                     "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id WHERE f.id = ?",
                     (frame_id,),
                 ).fetchone()
-                if row is not None and row["norad_cat_id"] is not None and row["t"] is not None:
+                if (
+                    row is not None and row["primary_frame_id"] == frame_id
+                    and row["norad_cat_id"] is not None and row["t"] is not None
+                ):
                     self._db.executemany(
                         """
                         INSERT INTO latest_values (norad_cat_id, field, value, frame_id, frame_time, source,
@@ -647,16 +813,22 @@ class StateStore:
         since: dt.datetime | None = None,
         until: dt.datetime | None = None,
         source: str | None = None,
+        copies: bool = False,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        """Decoded values of one field over time (oldest first, at most the newest ``limit`` points)."""
+        """Decoded values of one field over time (oldest first, at most the newest ``limit`` points).
+
+        One point per transmission (its primary frame) unless ``copies`` asks for every reception.
+        """
         path = json_path(field)
         sql = (
-            f"SELECT f.id, {_EFFECTIVE_TIME} AS t, f.source, f.station_name, json_extract(f.decoded_json, ?) AS v "
-            "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id "
+            f"SELECT f.id, {_EFFECTIVE_TIME} AS t, f.source, f.station_name, f.primary_frame_id, "
+            "json_extract(f.decoded_json, ?) AS v FROM frames f LEFT JOIN observations o ON o.id = f.observation_id "
             "WHERE f.decode_status = 'ok' AND f.norad_cat_id = ? AND json_extract(f.decoded_json, ?) IS NOT NULL"
         )
         params: list[Any] = [path, norad_cat_id, path]
+        if not copies:
+            sql += " AND f.primary_frame_id = f.id"
         if since is not None:
             sql += f" AND {_EFFECTIVE_TIME} >= ?"
             params.append(to_iso_z(since))
@@ -669,7 +841,8 @@ class StateStore:
         sql += f" ORDER BY {_EFFECTIVE_TIME} DESC, f.id DESC LIMIT ?"
         params.append(limit)
         rows = [
-            {"time": r["t"], "value": r["v"], "frame_id": r["id"], "source": r["source"], "station_name": r["station_name"]}
+            {"time": r["t"], "value": r["v"], "frame_id": r["id"], "source": r["source"],
+             "station_name": r["station_name"], "primary": r["primary_frame_id"] == r["id"]}
             for r in self._db.execute(sql, params)
         ]
         rows.reverse()
@@ -684,14 +857,16 @@ class StateStore:
         source: str | None = None,
         station_name: str | None = None,
         decode_status: str | None = None,
+        primary: bool | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Frame metadata (no bytes), newest first."""
+        """Frame metadata (no bytes), newest first; ``primary`` keeps only primaries (True) or the rest (False)."""
         sql = (
-            f"SELECT f.id, f.source, f.observation_id, f.norad_cat_id, f.station_name, f.url, "
-            f"{_EFFECTIVE_TIME} AS t, f.status, f.size, f.sha256, f.downloaded_at, f.decode_status, f.decoder, "
-            "f.decode_error, f.decoded_at FROM frames f LEFT JOIN observations o ON o.id = f.observation_id WHERE 1 = 1"
+            f"SELECT f.id, f.source, f.family, f.observation_id, f.norad_cat_id, f.station_name, f.url, "
+            f"{_EFFECTIVE_TIME} AS t, f.status, f.size, f.sha256, f.primary_frame_id, f.downloaded_at, "
+            "f.decode_status, f.decoder, f.decode_error, f.decoded_at "
+            "FROM frames f LEFT JOIN observations o ON o.id = f.observation_id WHERE 1 = 1"
         )
         params: list[Any] = []
         if norad_cat_id is not None:
@@ -713,6 +888,8 @@ class StateStore:
             sql += " AND f.decode_status = ?" if decode_status != "pending" else " AND f.decode_status IS NULL"
             if decode_status != "pending":
                 params.append(decode_status)
+        if primary is not None:
+            sql += " AND f.primary_frame_id = f.id" if primary else " AND f.primary_frame_id IS NOT f.id"
         sql += f" ORDER BY {_EFFECTIVE_TIME} DESC, f.id DESC LIMIT ? OFFSET ?"
         params += [limit, offset]
         return [self._frame_summary(r) for r in self._db.execute(sql, params)]
@@ -722,6 +899,7 @@ class StateStore:
         return {
             "id": r["id"],
             "source": r["source"],
+            "family": r["family"],
             "norad_cat_id": r["norad_cat_id"],
             "observation_id": r["observation_id"],
             "station_name": r["station_name"],
@@ -730,6 +908,8 @@ class StateStore:
             "status": r["status"],
             "size": r["size"],
             "sha256": r["sha256"],
+            "primary_frame_id": r["primary_frame_id"],
+            "primary": r["primary_frame_id"] == r["id"],
             "downloaded_at": r["downloaded_at"],
             "decode_status": r["decode_status"] or "pending",
             "decoder": r["decoder"],

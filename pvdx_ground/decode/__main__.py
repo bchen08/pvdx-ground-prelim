@@ -1,11 +1,12 @@
 """Command-line entry point ``pvdx-decode`` and the decode loop that ``pvdx-serve`` runs in-process.
 
-Reads stored, not-yet-decoded frames (from SatNOGS or pushed by our ground station), decodes them with
-the configured decoder, writes one InfluxDB point per frame, keeps the decoded fields and the latest
-value of every field in SQLite, and publishes the latest values to Redis when ``REDIS_URL`` is set.
+Reads stored, not-yet-decoded frames (from SatNOGS or pushed by our ground station), groups duplicate
+receptions of one transmission under a primary frame, decodes them with the configured decoder, writes one
+InfluxDB point per frame (copies tagged ``primary=false``), keeps the decoded fields and the latest value of
+every field (from primaries only) in SQLite, and publishes the latest values to Redis when ``REDIS_URL`` is set.
 A frame is only marked decoded after its point has been written, so a failed write is retried on the
-next run; frames the decoder rejects are marked ``error`` (re-run with ``--redo`` after fixing the
-decoder).
+next run; frames the decoder rejects, or that make it raise unexpectedly, are marked ``error`` (re-run
+with ``--redo`` after fixing the decoder), so one bad frame never blocks the ones behind it.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ import logging
 import os
 import sys
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pvdx_ground.config import ConfigError, Settings, load_dotenv
-from pvdx_ground.decode import DecodedFrame, DecodeError, Decoder, get_decoder
+from pvdx_ground.decode import DecodedFrame, DecodeError, Decoder, get_decoder, normalise_fields
 from pvdx_ground.ingest.state import StateStore
 from pvdx_ground.timeutil import to_iso_z, utcnow
 
@@ -84,19 +86,29 @@ def decode_once(
 ) -> dict[str, Any]:
     """Decode one batch of stored frames, write and publish them; returns the counters that were logged."""
     frames = store.frames_to_decode(norad_cat_id=norad, redo=redo, limit=limit)
+    unassigned = [f.id for f in frames if f.primary_frame_id is None]
+    if unassigned and not dry_run:  # the whole batch at once, so native copies win over gr-satellites ones
+        assigned = store.assign_primaries(unassigned)
+        frames = [replace(f, primary_frame_id=assigned.get(f.id, f.primary_frame_id)) for f in frames]
     counts: dict[str, Any] = {
-        "frames": len(frames), "decoded": 0, "written": 0, "rejected": 0, "empty": 0, "errors": 0, "published": 0,
+        "frames": len(frames), "decoded": 0, "copies": 0, "written": 0, "rejected": 0, "empty": 0, "errors": 0,
+        "published": 0,
     }
     batch: list[DecodedFrame] = []
     touched: set[int] = set()
+    crashes = 0
 
     def flush() -> None:
         if not batch:
             return
         if dry_run:
             for d in batch[:3]:
+                try:
+                    when: str | None = to_iso_z(d.frame.timestamp)
+                except ValueError:  # neither frame time nor observation; a real run marks it error
+                    when = None
                 print(json.dumps({"frame_id": d.frame.id, "source": d.frame.source, "observation_id": d.frame.observation_id,
-                                  "time": to_iso_z(d.frame.timestamp), "fields": d.fields}, indent=2))
+                                  "time": when, "fields": d.fields}, indent=2))
             counts["written"] += len(batch)
         else:
             assert writer is not None
@@ -106,7 +118,7 @@ def decode_once(
             for d in batch:
                 if d.frame.id in bad:
                     store.mark_decoded(d.frame.id, "error", decoded_at=now, error=bad[d.frame.id], decoder=d.decoder)
-                    log.warning("frame %d rejected by InfluxDB: %s", d.frame.id, bad[d.frame.id])
+                    log.warning("frame %d not written to InfluxDB: %s", d.frame.id, bad[d.frame.id])
                 else:
                     store.mark_decoded(d.frame.id, "ok", decoded_at=now, fields=d.fields, decoder=d.decoder)
                     touched.add(d.frame.norad_cat_id)
@@ -116,12 +128,20 @@ def decode_once(
 
     for frame in frames:
         try:
-            fields = decoder.decode(frame.raw)
+            fields = normalise_fields(decoder.decode(frame.raw))  # also covers decoders that skip it
         except DecodeError as exc:
             counts["errors"] += 1
             log.debug("frame %d: %s", frame.id, exc)
             if not dry_run:
                 store.mark_decoded(frame.id, "error", decoded_at=utcnow(), error=str(exc), decoder=decoder.name)
+            continue
+        except Exception as exc:  # noqa: BLE001 - a decoder bug must not wedge the loop on this frame
+            counts["errors"] += 1
+            crashes += 1
+            error = f"{decoder.name}: unexpected {type(exc).__name__}: {exc}"
+            log.error("frame %d: %s", frame.id, error, exc_info=crashes == 1)  # one traceback per pass
+            if not dry_run:
+                store.mark_decoded(frame.id, "error", decoded_at=utcnow(), error=error, decoder=decoder.name)
             continue
         if not fields:
             counts["empty"] += 1
@@ -129,6 +149,7 @@ def decode_once(
                 store.mark_decoded(frame.id, "empty", decoded_at=utcnow(), decoder=decoder.name)
             continue
         counts["decoded"] += 1
+        counts["copies"] += int(frame.is_copy)
         batch.append(DecodedFrame(frame=frame, decoder=decoder.name, fields=fields))
         if len(batch) >= BATCH:
             flush()
@@ -136,9 +157,9 @@ def decode_once(
     if publisher is not None and touched and not dry_run:
         counts["published"] = publish_latest(store, publisher, touched)
     log.info(
-        "decode: %d frame(s) read, %d decoded, %d written%s, %d rejected by InfluxDB, %d empty, "
-        "%d not telemetry/undecodable, %d Redis key(s) published",
-        counts["frames"], counts["decoded"], counts["written"], " (dry run)" if dry_run else "",
+        "decode: %d frame(s) read, %d decoded (%d duplicate reception(s)), %d written%s, %d rejected by InfluxDB, "
+        "%d empty, %d not telemetry/undecodable, %d Redis key(s) published",
+        counts["frames"], counts["decoded"], counts["copies"], counts["written"], " (dry run)" if dry_run else "",
         counts["rejected"], counts["empty"], counts["errors"], counts["published"],
     )
     return counts

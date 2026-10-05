@@ -12,7 +12,8 @@ throttling}.py, Sept 2026):
   carries ``Retry-After``. Frame files live on object storage and are not throttled.
 
 The client paces list requests proactively, backs off on 429/5xx/transport errors, and only sends the
-token to the SatNOGS host (never to the object-storage host that serves frame files).
+token to the SatNOGS host (never to the object-storage host that serves frame files). With a ``stop`` event
+(``pvdx-serve``) those waits end as soon as it is set and the request raises ``StopRequested``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import datetime as dt
 import logging
 import random
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -54,6 +56,10 @@ class SatnogsError(RuntimeError):
 
 class SatnogsAuthError(SatnogsError):
     """The API rejected our credentials and anonymous access was not possible."""
+
+
+class StopRequested(Exception):
+    """The ``stop`` event was set while waiting to pace or retry a request (a shutdown, not a SatNOGS error)."""
 
 
 @dataclass
@@ -104,7 +110,8 @@ def parse_retry_after(value: str | None, *, now: Callable[[], dt.datetime] | Non
 class NetworkClient:
     """Thin, polite wrapper around the SatNOGS Network REST API.
 
-    ``sleep``/``monotonic``/``jitter`` are injectable so tests can run without waiting.
+    ``sleep``/``monotonic``/``jitter`` are injectable so tests can run without waiting. With ``stop``, pacing
+    and backoff wait on the event instead of sleeping and raise ``StopRequested`` once it is set.
     """
 
     def __init__(
@@ -120,6 +127,7 @@ class NetworkClient:
         monotonic: Callable[[], float] = time.monotonic,
         jitter: Callable[[], float] = random.random,
         user_agent: str = USER_AGENT,
+        stop: threading.Event | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token or None
@@ -129,6 +137,7 @@ class NetworkClient:
         self._sleep = sleep
         self._monotonic = monotonic
         self._jitter = jitter
+        self._stop = stop
         self._last_api_call: float | None = None
         self.requests_made = 0
         self._http = httpx.Client(
@@ -157,13 +166,19 @@ class NetworkClient:
         rate = AUTH_REQUESTS_PER_HOUR if self.token else ANON_REQUESTS_PER_HOUR
         return 3600.0 / rate * 1.05  # 5 % safety margin under the throttle
 
+    def _wait(self, seconds: float) -> None:
+        if self._stop is None:
+            self._sleep(seconds)
+        elif self._stop.wait(seconds):
+            raise StopRequested("stop requested while waiting between SatNOGS requests")
+
     def _pace(self) -> None:
         if self._last_api_call is None:
             return
         wait = self._last_api_call + self.min_interval - self._monotonic()
         if wait > 0:
             log.debug("pacing: sleeping %.1fs before next API request", wait)
-            self._sleep(wait)
+            self._wait(wait)
 
     # -- URLs --------------------------------------------------------------------------------------
     def observations_url(
@@ -210,7 +225,7 @@ class NetworkClient:
             delay = min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_MAX_SECONDS)
         delay += delay * 0.1 * self._jitter()
         log.warning("%s; retry %d/%d in %.1fs", reason, attempt, self.max_retries, delay)
-        self._sleep(delay)
+        self._wait(delay)
 
     def _request(self, url: str, *, paced: bool) -> httpx.Response:
         """GET ``url`` with pacing (API only), auth (API only), backoff and 401 fallback."""

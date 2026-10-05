@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 
 import httpx
 import pytest
@@ -14,11 +16,11 @@ T0 = dt.datetime(2026, 9, 26, 20, 0, 0, tzinfo=UTC)
 OVERLAP = dt.timedelta(hours=48)
 
 
-def make_worker(fake_api, clock, store, **kw):
-    client = make_client(fake_api, clock)
+def make_worker(fake_api, clock, store, *, stop=None, **kw):
+    client = make_client(fake_api, clock, stop=stop)
     return IngestWorker(
         client, store, norad_cat_id=NORAD, start=SINCE, overlap=OVERLAP, status="good",
-        now=FakeNow(T0), sleep=clock.sleep, download_delay=0.0, **kw,
+        now=FakeNow(T0), sleep=clock.sleep, download_delay=0.0, stop=stop, **kw,
     )
 
 
@@ -208,3 +210,60 @@ def test_run_forever_keeps_polling_through_errors(fake_api, clock, store):
         worker.run_forever(30)
     assert runs == [30, 30]
     assert store.stats(NORAD)["frames_ok"] == total_frames(fake_api)
+
+
+def test_stop_ends_a_sweep_promptly_and_the_next_run_resumes(fake_api, clock, store):
+    stop = threading.Event()
+    worker = make_worker(fake_api, clock, store, stop=stop)
+    timer = threading.Timer(0.2, stop.set)  # lands while the client paces page 2 (63 s anonymous)
+    started = time.monotonic()
+    timer.start()
+    try:
+        worker.run_forever(600, stop=stop)  # what pvdx-serve's ingest thread runs
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 5
+    assert len(fake_api.api_calls) == 1  # page 2 never requested
+    sweep = store.unfinished_sweep(NORAD, "good")
+    assert sweep is not None and sweep.next_url == fake_api.page2_url and sweep.pages_done == 1
+    assert store.stats(NORAD)["frames_ok"] == 2 and store.stats(NORAD)["frames_failed"] == 0
+
+    fake_api.calls.clear()
+    resumed = make_worker(fake_api, clock, store).run_once()
+    assert resumed.resumed and resumed.completed and resumed.pages == 2
+    assert store.stats(NORAD)["frames_ok"] == total_frames(fake_api)
+
+
+def set_stop_on_first_frame_request(fake_api, stop: threading.Event) -> None:
+    recorded = fake_api.handler
+
+    def handler(request):
+        response = recorded(request)
+        if request.url.host != "network.satnogs.org":
+            stop.set()
+        return response
+
+    fake_api.handler = handler
+
+
+def test_stop_between_frame_downloads_leaves_the_rest_pending(fake_api, clock, store):
+    stop = threading.Event()
+    set_stop_on_first_frame_request(fake_api, stop)  # shutdown starts right after the first frame download
+    result = make_worker(fake_api, clock, store, stop=stop).run_once()
+    assert not result.completed and result.pages == 1
+    assert result.frames_downloaded == 1 and result.frames_failed == 0
+    assert len(fake_api.api_calls) == 1 and len(fake_api.frame_calls) == 1
+    stats = store.stats(NORAD)
+    assert stats["frames_ok"] == 1 and stats["frames_pending"] == 1 and stats["frames_failed"] == 0
+
+
+def test_stop_during_a_download_retry_does_not_burn_an_attempt(fake_api, clock, store):
+    stop = threading.Event()
+    for url in fake_api.frames:
+        fake_api.queue(url, httpx.Response(503, text="s3 hiccup"))
+    set_stop_on_first_frame_request(fake_api, stop)  # shutdown starts while the client backs off from S3
+    result = make_worker(fake_api, clock, store, stop=stop).run_once()
+    assert result.frames_failed == 0 and result.errors == []
+    assert len(fake_api.frame_calls) == 1  # no retry after stop
+    assert store.stats(NORAD)["frames_failed"] == 0 and store.stats(NORAD)["frames_pending"] == 2
+    assert store._db.execute("SELECT MAX(attempts) FROM frames").fetchone()[0] == 0  # full budget kept

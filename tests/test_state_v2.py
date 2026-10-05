@@ -1,4 +1,4 @@
-"""Schema version 2: in-place migration from v1, pushed frames, latest values, history and listings."""
+"""Schema version 2 and later: in-place migration from v1, pushed frames, latest values, history and listings."""
 
 from __future__ import annotations
 
@@ -80,9 +80,13 @@ def test_v1_database_is_migrated_in_place(tmp_path, caplog):
     path = tmp_path / "state.db"
     obs_id, urls = make_v1_db(path)
     with StateStore(path) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 2
+        assert store.schema_version() == SCHEMA_VERSION == 3  # v1 -> v2 -> v3
         columns = {r[1] for r in store._db.execute("PRAGMA table_info(frames)")}
-        assert {"source", "norad_cat_id", "station_name", "meta_json", "decoder", "decoded_json"} <= columns
+        assert {"source", "norad_cat_id", "station_name", "meta_json", "decoder", "decoded_json", "family",
+                "primary_frame_id"} <= columns
+        assert {r[0] for r in store._db.execute("SELECT family FROM frames")} == {"grsat"}  # the recorded '_g0' files
+        assert store.get_frame(1)["primary"] and store.get_frame(3)["primary"]  # stored frames got their primary
+        assert store.get_frame(2)["primary_frame_id"] is None  # not downloaded yet: assigned when decoded
         assert "frames_v1" not in {r[0] for r in store._db.execute("SELECT name FROM sqlite_master")}
         # satellite and station were copied from the observation, bytes and bookkeeping kept
         todo = store.frames_to_decode()
@@ -98,7 +102,7 @@ def test_v1_database_is_migrated_in_place(tmp_path, caplog):
     assert any("migrating" in r.message for r in caplog.records)
     caplog.clear()
     with StateStore(path) as store:  # a second open is a no-op
-        assert store.schema_version() == 2
+        assert store.schema_version() == 3
     assert not any("migrating" in r.message for r in caplog.records)
 
 

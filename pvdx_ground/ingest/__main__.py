@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state", help="override STATE_DB path")
     parser.add_argument("--status", help="override INGEST_STATUS (default good)")
     parser.add_argument("--overlap-hours", type=float, help="override INGEST_OVERLAP_HOURS")
-    parser.add_argument("--min-interval", type=float, help="seconds between API list requests (default from throttle)")
+    parser.add_argument("--min-interval", type=float, help="seconds between API list requests (default from throttle, min 15)")
     parser.add_argument("--max-pages", type=int, help="stop after N pages this run (sweep resumes next run)")
     parser.add_argument("--poll", type=float, metavar="SECONDS", help="loop forever, sleeping SECONDS between runs")
     parser.add_argument("--retry-failed", action="store_true", help="reset the attempt budget of failed frames before running")
@@ -46,7 +46,10 @@ def run_ingest(
     retry_failed: bool = False,
     stop: threading.Event | None = None,
 ) -> int:
-    """Run one sweep, or sweep every ``poll`` seconds until ``stop`` is set. Returns an exit code."""
+    """Run one sweep, or sweep every ``poll`` seconds until ``stop`` is set. Returns an exit code.
+
+    ``stop`` also ends a sweep early, between pages and between frame downloads (it resumes next run).
+    """
     if settings.norad_cat_id is None:
         raise ConfigError("NORAD_CAT_ID is not set (put it in .env or pass --norad)")
     with StateStore(settings.state_db) as store:
@@ -54,7 +57,8 @@ def run_ingest(
             n = store.reset_failed_frames(settings.norad_cat_id)
             log.info("reset %d failed frame(s) for another download attempt", n)
         with NetworkClient(
-            settings.satnogs_network_url, settings.satnogs_api_token, min_interval=settings.ingest_min_interval
+            settings.satnogs_network_url, settings.satnogs_api_token, min_interval=settings.ingest_min_interval,
+            stop=stop,
         ) as client:
             if not settings.satnogs_api_token:
                 log.warning("SATNOGS_API_TOKEN not set: using anonymous access (60 requests/hour)")
@@ -66,6 +70,7 @@ def run_ingest(
                 overlap=settings.ingest_overlap,
                 status=settings.ingest_status,
                 max_pages=max_pages,
+                stop=stop,
             )
             if poll:
                 worker.run_forever(poll, stop=stop)

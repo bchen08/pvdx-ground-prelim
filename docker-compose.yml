@@ -3,12 +3,15 @@
 # localhost:8086 (InfluxDB) and localhost:6379 (Redis).
 # `docker compose --profile cloud up -d --build` additionally builds and runs the service itself
 # (pvdx-serve: ingest + decode + API on :8080) from ./Dockerfile, with state in ./data.
+# Ports are published on 127.0.0.1 only, because Docker-published ports bypass host firewalls such as
+# ufw. GRAFANA_BIND / API_BIND=0.0.0.0 expose Grafana / the API: only behind a TLS reverse proxy and a
+# network/cloud firewall or security group (not ufw).
 services:
   influxdb:
     image: influxdb:2.7
     container_name: pvdx-influxdb
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-admin}
@@ -25,25 +28,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   redis:
-    # Volatile latest-values cache (GS3 in the comms design); nothing here needs to survive a restart.
+    # Volatile latest-value cache: the telemetry half of GS3 in the comms design (no command queue);
+    # nothing here needs to survive a restart. No password, so never publish it beyond loopback.
     image: redis:7-alpine
     container_name: pvdx-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   grafana:
     image: grafana/grafana:11.3.0
     container_name: pvdx-grafana
     ports:
-      - "3000:3000"
+      - "${GRAFANA_BIND:-127.0.0.1}:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
@@ -61,6 +67,12 @@ services:
     depends_on:
       influxdb:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
 
   pvdx:
     # The service itself. Only with `--profile cloud`, so host-run pvdx-serve and the container
@@ -78,7 +90,7 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: "8080"
     ports:
-      - "${API_PORT:-8080}:8080"
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
     volumes:
       - ./data:/data
     depends_on:

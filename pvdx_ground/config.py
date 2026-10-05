@@ -8,16 +8,26 @@ environment and never logged.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
+from typing import Any
 
 from pvdx_ground.timeutil import parse_iso8601, utcnow
 
 _DOTENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+_NUMBER = r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+# The field part of a TELEMETRY_ALIASES entry (the unit is split off first): field[*scale][(+|-)offset].
+# A field never contains "*" and never ends in "+", "-" or a space, so "x*abc" or "x+" is an error, not a name.
+_ALIAS_TARGET = re.compile(
+    rf"^(?P<field>[^*]*?[^*+\s-])\s*(?:\*\s*(?P<scale>[+-]?{_NUMBER}))?\s*(?P<offset>[+-]\s*{_NUMBER})?$"
+)
+# Fastest pacing SatNOGS allows: 240 list requests/hour with a token (AUTH_REQUESTS_PER_HOUR in ingest/client.py).
+_MIN_INGEST_INTERVAL = 3600 / 240
 
 
 class ConfigError(ValueError):
@@ -69,23 +79,76 @@ def _number(env: Mapping[str, str], key: str, default: float, *, minimum: float 
         value = float(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be a number, got {raw!r}") from exc
+    if not math.isfinite(value):  # nan would pass any minimum (every comparison is false)
+        raise ConfigError(f"{key} must be a finite number, got {raw!r}")
     if minimum is not None and value < minimum:
         raise ConfigError(f"{key} must be >= {minimum:g}, got {raw!r}")
     return value
 
 
-def parse_aliases(text: str | None) -> dict[str, str]:
-    """Parse ``TELEMETRY_ALIASES`` (``alias=field,alias=field``) into ``{alias: field}``."""
-    aliases: dict[str, str] = {}
+def is_number(value: Any) -> bool:
+    """True for ints and floats; bools and strings are not numbers here."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+@dataclass(frozen=True)
+class TelemetryAlias:
+    """One ``TELEMETRY_ALIASES`` target: a decoded field, optionally converted to an engineering unit."""
+
+    field: str
+    scale: float = 1.0
+    offset: float = 0.0
+    unit: str | None = None
+
+    @property
+    def converts(self) -> bool:
+        """True when the alias scales or offsets the raw value instead of passing it through."""
+        return self.scale != 1.0 or self.offset != 0.0
+
+    def convert(self, value: Any) -> Any:
+        """The alias value for the raw ``value``: ``value * scale + offset``.
+
+        Without a scale or offset the value passes through unchanged (strings too). Converted values are
+        floats rounded to 12 significant digits, which drops the binary rounding error of the arithmetic
+        (``163 * 0.01`` is ``1.6300000000000001``) and keeps far more precision than any sensor has.
+        Returns ``None`` when a converting alias gets something that is not a finite number.
+        """
+        if not self.converts:
+            return value
+        if not is_number(value):
+            return None
+        try:
+            converted = float(f"{value * self.scale + self.offset:.12g}")
+        except OverflowError:  # an int too large for a float
+            return None
+        return converted if math.isfinite(converted) else None
+
+
+def parse_aliases(text: str | None) -> dict[str, TelemetryAlias]:
+    """Parse ``TELEMETRY_ALIASES`` into ``{alias: TelemetryAlias}``.
+
+    Entries are comma separated, each ``alias=field[*scale][(+|-)offset][:unit]``:
+    ``battery=psu_battery*0.001:V`` serves ``psu_battery`` (mV) as ``battery`` in volts, and
+    ``signal_rssi=uhf_act_rssi_raw*0.5-134:dBm`` applies an offset after the scale. A plain
+    ``alias=field`` passes the raw value through unchanged, as before. Field names cannot contain ``*``
+    or ``:``, and a trailing ``+<number>`` or ``-<number>`` is always read as an offset.
+    """
+    aliases: dict[str, TelemetryAlias] = {}
     for part in (text or "").split(","):
         part = part.strip()
         if not part:
             continue
-        alias, sep, field = part.partition("=")
-        alias, field = alias.strip(), field.strip()
-        if not sep or not alias or not field:
-            raise ConfigError(f"TELEMETRY_ALIASES entry {part!r} is not alias=field")
-        aliases[alias] = field
+        alias, sep, target = part.partition("=")
+        target, colon, unit = target.partition(":")
+        match = _ALIAS_TARGET.match(target.strip())
+        alias, unit = alias.strip(), unit.strip()
+        if not sep or not alias or match is None or (colon and not unit):
+            raise ConfigError(f"TELEMETRY_ALIASES entry {part!r} is not alias=field[*scale][(+|-)offset][:unit]")
+        scale = float(match.group("scale") or 1)
+        offset = float("".join((match.group("offset") or "0").split()))  # "- 134" -> -134
+        if scale == 0 or not math.isfinite(scale) or not math.isfinite(offset):
+            raise ConfigError(f"TELEMETRY_ALIASES entry {part!r}: scale must be non-zero and both numbers finite")
+        aliases[alias] = TelemetryAlias(match.group("field").strip(), scale, offset, unit or None)
     return aliases
 
 
@@ -119,7 +182,7 @@ class Settings:
     ingest_poll: float = 600.0
     decode_poll: float = 60.0
     telemetry_stale_after: float = 3600.0
-    telemetry_aliases: Mapping[str, str] = dc_field(default_factory=dict)
+    telemetry_aliases: Mapping[str, TelemetryAlias] = dc_field(default_factory=dict)
     # -- Redis latest-values publisher --
     redis_url: str | None = None
     redis_key_prefix: str = "telemetry:"
@@ -165,11 +228,9 @@ class Settings:
         if overlap < dt.timedelta(0):
             raise ConfigError("INGEST_OVERLAP_HOURS must be >= 0")
 
-        interval_raw = _get(env, "INGEST_MIN_INTERVAL")
-        try:
-            min_interval = float(interval_raw) if interval_raw else None
-        except ValueError as exc:
-            raise ConfigError(f"INGEST_MIN_INTERVAL must be seconds, got {interval_raw!r}") from exc
+        min_interval: float | None = None
+        if _get(env, "INGEST_MIN_INTERVAL") is not None:
+            min_interval = _number(env, "INGEST_MIN_INTERVAL", 0.0, minimum=_MIN_INGEST_INTERVAL)
 
         status = _get(env, "INGEST_STATUS", "good") or "good"
         if status not in {"failed", "bad", "unknown", "future", "good"}:
@@ -178,6 +239,15 @@ class Settings:
         api_port = int(_number(env, "API_PORT", 8080, minimum=1))
         if api_port > 65535:
             raise ConfigError("API_PORT must be <= 65535")
+
+        # Checked here so a typo stops the service at startup instead of killing the decode worker later.
+        # The values are not echoed: a URL can carry a password.
+        influx_url = _get(env, "INFLUX_URL", "http://localhost:8086") or "http://localhost:8086"
+        if not influx_url.lower().startswith(("http://", "https://")):
+            raise ConfigError("INFLUX_URL must start with http:// or https:// (e.g. http://localhost:8086)")
+        redis_url = _get(env, "REDIS_URL")
+        if redis_url is not None and not redis_url.lower().startswith(("redis://", "rediss://", "unix://")):
+            raise ConfigError("REDIS_URL must start with redis://, rediss:// or unix:// (e.g. redis://localhost:6379/0)")
 
         return cls(
             norad_cat_id=norad,
@@ -189,7 +259,7 @@ class Settings:
             ingest_min_interval=min_interval,
             state_db=Path(_get(env, "STATE_DB", "data/state.db") or "data/state.db"),
             decoder=_get(env, "DECODER"),
-            influx_url=_get(env, "INFLUX_URL", "http://localhost:8086") or "http://localhost:8086",
+            influx_url=influx_url,
             influx_org=_get(env, "INFLUX_ORG", "bse") or "bse",
             influx_bucket=_get(env, "INFLUX_BUCKET", "telemetry") or "telemetry",
             influx_token=_get(env, "INFLUX_TOKEN"),
@@ -201,7 +271,7 @@ class Settings:
             decode_poll=_number(env, "DECODE_POLL", 60.0, minimum=1),
             telemetry_stale_after=_number(env, "TELEMETRY_STALE_AFTER", 3600.0, minimum=0),
             telemetry_aliases=parse_aliases(_get(env, "TELEMETRY_ALIASES")),
-            redis_url=_get(env, "REDIS_URL"),
+            redis_url=redis_url,
             redis_key_prefix=_get(env, "REDIS_KEY_PREFIX", "telemetry:") or "telemetry:",
             redis_telemetry_ttl=int(_number(env, "REDIS_TELEMETRY_TTL", 3600, minimum=1)),
             push_url=(_get(env, "PUSH_URL") or "").rstrip("/") or None,

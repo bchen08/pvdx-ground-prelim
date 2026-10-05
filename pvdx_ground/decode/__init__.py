@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -56,8 +57,9 @@ class DecodedFrame:
 def normalise_fields(values: Mapping[str, Any]) -> Fields:
     """Coerce a decoder's raw output into ``dict[str, float | int | str]``.
 
-    bools become ints, enums their names, bytes a hex string; ``None`` and non-scalar values
-    (lists, nested structs) are dropped with a debug log line.
+    bools become ints, enums their names, bytes a hex string; ``None``, NaN and +/-inf (which JSON,
+    Redis and InfluxDB cannot carry) are dropped, and so are non-scalar values (lists, nested structs)
+    with a debug log line.
     """
     out: Fields = {}
     for key, value in values.items():
@@ -68,7 +70,7 @@ def normalise_fields(values: Mapping[str, Any]) -> Fields:
         if isinstance(value, bool):
             out[key] = int(value)
         elif isinstance(value, (int, float)):
-            if isinstance(value, float) and value != value:  # NaN
+            if isinstance(value, float) and not math.isfinite(value):  # NaN, +inf, -inf
                 continue
             out[key] = value
         elif isinstance(value, str):
